@@ -6,296 +6,225 @@ from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
 from io import StringIO
 import json
-import os
+import concurrent.futures
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
-from pymongo import MongoClient  # Import MongoDB client
-from datetime import datetime 
-# MongoDB Configuration
-client = MongoClient('mongodb://localhost:27017/')  # Replace with your MongoDB URI
-db = client['seo_analyzer']
-results_collection = db['analysis_results']
+from datetime import datetime
+from collections import Counter
 
 app = Flask(__name__)
 
-# Download necessary NLTK data files
 nltk.download('stopwords')
 nltk.download('punkt')
+stop_words = set(stopwords.words('english'))
 
-def capture_screenshot(url, output_file, viewport_size):
+# --- Selenium Headless Chrome Utility ---
+def fetch_page_data(url):
     chrome_options = Options()
     chrome_options.add_argument("--headless")
-    chrome_options.add_argument(f"--window-size={viewport_size}")  # Set viewport size
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1280,1024")
+
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
     driver.get(url)
-    driver.save_screenshot(output_file)
+
+    # Take desktop screenshot
+    desktop_screenshot = 'static/desktop_preview.png'
+    driver.save_screenshot(desktop_screenshot)
+
+    # Take mobile screenshot
+    driver.set_window_size(360, 640)
+    mobile_screenshot = 'static/mobile_preview.png'
+    driver.save_screenshot(mobile_screenshot)
+
+    # Get load time
+    timing = driver.execute_script("return window.performance.timing")
+    load_time = (timing['loadEventEnd'] - timing['navigationStart']) / 1000
+
+    html = driver.page_source
     driver.quit()
+    return html, load_time, mobile_screenshot, desktop_screenshot
 
-def analyze_seo(url):
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'html.parser')
+# --- Keyword Extraction Optimized ---
+def extract_top_keywords(text, top_n=10):
+    words = word_tokenize(text.lower())
+    words_filtered = [w for w in words if w.isalpha() and w not in stop_words]
+    return Counter(words_filtered).most_common(top_n)
 
-    # Keyword Density Analysis
-    def calculate_keyword_density(text, keywords):
-        word_count = len(text.split())
-        keyword_density = {keyword: (freq / word_count) * 100 for keyword, freq in keywords.items()}
-        return keyword_density
+# --- Check if Page is Mobile Friendly ---
+def check_mobile_friendly(soup):
+    if soup.find('meta', attrs={'name': 'viewport'}):
+        return "Viewport tag exists. The page is likely mobile-friendly."
+    return "Viewport tag is missing! Consider adding it."
 
-    body_text = soup.get_text().lower()
-    keywords = {"example": body_text.count("example")}  # Replace with dynamic keyword extraction logic
-    keyword_density = calculate_keyword_density(body_text, keywords)
+# --- Schema Detection ---
+def detect_schema(soup):
+    types = []
+    for script in soup.find_all('script', type='application/ld+json'):
+        try:
+            data = json.loads(script.string)
+            if '@type' in data:
+                types.append(data['@type'])
+        except:
+            continue
+    return types
 
-    # Mobile-Friendliness Check
-    def check_mobile_friendly(soup):
-        viewport = soup.find('meta', attrs={'name': 'viewport'})
-        if viewport:
-            return "Viewport tag exists. The page is likely mobile-friendly."
-        else:
-            return "Viewport tag is missing! Consider adding it to make your page responsive."
+# --- Accessibility Checks ---
+def check_accessibility(soup):
+    issues = []
+    for img in soup.find_all('img'):
+        if not img.get('alt'):
+            issues.append(f"Image with src '{img.get('src')}' is missing alt text.")
+    return issues
 
-    mobile_friendly = check_mobile_friendly(soup)
+# --- Parallel Broken Link Checker ---
+def check_broken_links(soup, base_url):
+    links = [a['href'] for a in soup.find_all('a', href=True)]
 
-    # Schema Markup Detection
-    def detect_schema_markup(soup):
-        schema_types = []
-        for script in soup.find_all('script', type='application/ld+json'):
-            try:
-                json_content = json.loads(script.string)
-                if '@type' in json_content:
-                    schema_types.append(json_content['@type'])
-            except json.JSONDecodeError:
-                continue
-        return schema_types
-
-    schema_types = detect_schema_markup(soup)
-
-    # Accessibility Checks
-    def check_accessibility(soup):
-        accessibility_issues = []
-        for img in soup.find_all('img'):
-            if not img.get('alt'):
-                accessibility_issues.append(f"Image with src '{img.get('src')}' is missing alt text.")
-        # Add more checks as needed
-        return accessibility_issues
-
-    accessibility_issues = check_accessibility(soup)
-
-    # Page Load Time Analysis
-    def analyze_page_load_time(url):
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-        driver.get(url)
-        navigation_start = driver.execute_script("return window.performance.timing.navigationStart")
-        load_event_end = driver.execute_script("return window.performance.timing.loadEventEnd")
-        load_time = load_event_end - navigation_start
-        driver.quit()
-        return load_time / 1000  # Convert to seconds
-
-    page_load_time = analyze_page_load_time(url)
-
-    # Broken Link Checker
-    def check_broken_links(soup, base_url):
-        broken_links = []
-        for link in soup.find_all('a', href=True):
-            href = link.get('href')
+    def is_broken(href):
+        try:
             if not href.startswith(('http://', 'https://')):
-                href = base_url + href
-            try:
-                response = requests.head(href)
-                if response.status_code >= 400:
-                    broken_links.append(href)
-            except requests.RequestException:
-                broken_links.append(href)
-        return broken_links
+                href = base_url.rstrip('/') + '/' + href.lstrip('/')
+            r = requests.head(href, timeout=3)
+            if r.status_code >= 400:
+                return href
+        except:
+            return href
+        return None
 
-    broken_links = check_broken_links(soup, url)
+    broken = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        for result in executor.map(is_broken, links):
+            if result:
+                broken.append(result)
+    return broken
 
-    # Social Media Integration Analysis
-    def check_social_media_integration(soup):
-        social_media_tags = {
-            'og:title': 'Open Graph Title',
-            'og:description': 'Open Graph Description',
-            'twitter:card': 'Twitter Card'
-        }
-        missing_tags = []
-        for tag, description in social_media_tags.items():
-            if not soup.find('meta', attrs={'property': tag}) and not soup.find('meta', attrs={'name': tag}):
-                missing_tags.append(f"{description} ({tag}) is missing.")
-        return missing_tags
+# --- Social Media Meta Checks ---
+def check_social_meta(soup):
+    tags = {
+        'og:title': 'Open Graph Title',
+        'og:description': 'Open Graph Description',
+        'twitter:card': 'Twitter Card'
+    }
+    missing = []
+    for tag, desc in tags.items():
+        if not soup.find('meta', attrs={'property': tag}) and not soup.find('meta', attrs={'name': tag}):
+            missing.append(f"{desc} ({tag}) is missing.")
+    return missing
 
-    social_media_issues = check_social_media_integration(soup)
+# --- Main SEO Analysis Function ---
+def analyze_seo(url):
+    html, load_time, mobile_ss, desktop_ss = fetch_page_data(url)
+    soup = BeautifulSoup(html, 'html.parser')
 
-    # Existing SEO analysis
-    good = []
-    bad = []
-    keywords = []
-    title_keywords = []
-    seo_title = None
-    seo_description = None
-    links_ratio = {'internal': 0, 'external': 0}
-    score = 100  # Start with a perfect score of 100
-    recommendations = []
+    good, bad, recommendations = [], [], []
+    score = 100
+    image_alts, title_keywords = [], []
 
-    # Check title
+    # Title
     title_tag = soup.find('title')
-    if title_tag and title_tag.get_text():
-        seo_title = title_tag.get_text().strip()
+    seo_title = title_tag.get_text().strip() if title_tag else None
+    if seo_title:
         good.append("Title Exists! Great!")
     else:
-        bad.append("Title does not exist! Add a Title")
-        recommendations.append("Add a title to your page to improve SEO ranking.")
-        score -= 10  # Deduct points for missing title
+        bad.append("Title does not exist!")
+        recommendations.append("Add a title.")
+        score -= 10
 
-    # Check meta description
+    # Meta Description
     meta_desc = soup.find('meta', attrs={'name': 'description'})
-    if meta_desc and meta_desc.get('content') and len(meta_desc.get('content')) > 50:
+    seo_description = meta_desc.get('content').strip() if meta_desc and meta_desc.get('content') else None
+    if seo_description and len(seo_description) > 50:
         good.append("Description Exists! Great!")
-        seo_description=meta_desc.get('content').strip()
     else:
-        bad.append("Description is missing, too short, or not relevant! Add a proper Meta Description")
-        recommendations.append("Include a meta description that accurately describes the page content and includes relevant keywords.")
-        score -= 10  # Deduct points for missing or poor description
-    # Check headings
-    hs = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
-    h_tags = []
-    for h in soup.find_all(hs):
-        good.append(f"{h.name} --> {h.text.strip()}")
-        h_tags.append(h.name)
+        bad.append("Description is missing or too short!")
+        recommendations.append("Add a meta description.")
+        score -= 10
 
+    # Headings
+    headings = [h for h in soup.find_all(['h1','h2','h3','h4','h5','h6'])]
+    for h in headings:
+        good.append(f"{h.name}: {h.text.strip()}")
     h1_tags = soup.find_all('h1')
     if not h1_tags:
         bad.append("No H1 found!")
-        recommendations.append("Add a single H1 tag that accurately describes the content of the page.")
-        score -= 10  # Deduct points for missing H1
+        recommendations.append("Add an H1 tag.")
+        score -= 10
     elif len(h1_tags) > 1:
         bad.append(f"Multiple H1 tags found: {len(h1_tags)}")
-        recommendations.append("Use only one H1 tag per page to ensure clear content hierarchy.")
-        score -= 5  # Deduct points for multiple H1s
+        recommendations.append("Use only one H1.")
+        score -= 5
     else:
         good.append(f"One H1 tag found: {h1_tags[0].text.strip()}")
 
-    # Check images for alt attributes
-    image_alt_attributes = []
+    # Image ALTs
     for img in soup.find_all('img'):
         if not img.get('alt'):
-            bad.append(f"Image with src '{img.get('src')}' is missing alt text")
-            recommendations.append(f"Add alt text to the image with src '{img.get('src')}' to improve accessibility and SEO.")
-            score -= 5  # Deduct points for missing alt text
-        elif img.get('alt').strip() == '':
-            bad.append(f"Image with src '{img.get('src')}' has empty alt text")
-            recommendations.append(f"Provide meaningful alt text for the image with src '{img.get('src')}'.")
+            bad.append(f"Image missing alt: {img.get('src')}")
+            recommendations.append(f"Add alt to {img.get('src')}")
+            score -= 5
+        elif img.get('alt').strip():
+            image_alts.append(img.get('alt').strip())
+
+    # Keyword Extraction
+    body_text = soup.get_text()
+    keywords = extract_top_keywords(body_text)
+    title_words = word_tokenize(seo_title.lower()) if seo_title else []
+    title_keywords = [w for w in title_words if w.isalpha() and w not in stop_words]
+
+    # Keyword Density (example only)
+    total_words = len(body_text.split())
+    keyword_density = {kw: (freq/total_words)*100 for kw, freq in keywords} if total_words > 0 else {}
+
+    # Links ratio
+    internal, external = 0, 0
+    for a in soup.find_all('a', href=True):
+        if a['href'].startswith(url):
+            internal += 1
         else:
-            image_alt_attributes.append(img.get('alt').strip())
+            external += 1
+    links_ratio = {'internal': internal, 'external': external}
 
-    # Extract keywords
-    bod = soup.find('body').text
-    words = [i.lower() for i in word_tokenize(bod)]
-    sw = stopwords.words('english')
-    new_words = [i for i in words if i not in sw and i.isalpha()]
-    freq = nltk.FreqDist(new_words)
-    keywords = freq.most_common(10)
+    return (
+        good, bad, keywords, score, seo_title, seo_description,
+        image_alts, links_ratio, title_keywords, recommendations,
+        keyword_density, check_mobile_friendly(soup), detect_schema(soup),
+        check_accessibility(soup), load_time,
+        check_broken_links(soup, url), check_social_meta(soup),
+        mobile_ss, desktop_ss
+    )
 
-    # Calculate internal and external links
-    internal_links = 0
-    external_links = 0
-    for link in soup.find_all('a', href=True):
-        href = link.get('href')
-        if href.startswith(url):
-            internal_links += 1
-        else:
-            external_links += 1
+# --- Report Generator ---
+def generate_report(*args):
+    (
+        good, bad, keywords, score, seo_title, seo_description,
+        image_alts, links_ratio, title_keywords, recommendations,
+        keyword_density, mobile_friendly, schema_types,
+        accessibility_issues, load_time,
+        broken_links, social_media_issues
+    ) = args
 
-    links_ratio = {'internal': internal_links, 'external': external_links}
-
-    # Extract keywords from title
-    if seo_title:
-        title_words = [i.lower() for i in word_tokenize(seo_title)]
-        title_keywords = [i for i in title_words if i not in sw and i.isalpha()]
-
-    # Capture screenshots
-    mobile_screenshot_path = 'static/mobile_search_preview.png'
-    desktop_screenshot_path = 'static/desktop_search_preview.png'
-    capture_screenshot(url, mobile_screenshot_path, "360,640")  # Mobile viewport
-    capture_screenshot(url, desktop_screenshot_path, "1280,1024")  # Desktop viewport
-
-    return good, bad, keywords, score, seo_title, seo_description, image_alt_attributes, links_ratio, title_keywords, recommendations, keyword_density, mobile_friendly, schema_types, accessibility_issues, page_load_time, broken_links, social_media_issues, mobile_screenshot_path, desktop_screenshot_path
-
-def generate_report(good, bad, keywords, score, seo_title, seo_description, image_alt_attributes, links_ratio, title_keywords, recommendations, keyword_density, mobile_friendly, schema_types, accessibility_issues, page_load_time, broken_links, social_media_issues):
-    # Generate a text report with SEO analysis results and recommendations
     report = StringIO()
-    report.write(f"SEO Analysis Report\n")
-    report.write(f"Overall Score: {score}\n\n")
-    report.write(f"SEO Title: {seo_title}\n")
-    report.write(f"SEO Description: {seo_description}\n\n")
-
-    report.write("Top Keywords:\n")
-    for keyword, frequency in keywords:
-        report.write(f"{keyword}: {frequency}\n")
-    report.write("\n")
-
-    report.write("Title Keywords:\n")
-    for keyword in title_keywords:
-        report.write(f"{keyword}\n")
-    report.write("\n")
-
-    report.write("Keyword Density:\n")
-    for keyword, density in keyword_density.items():
-        report.write(f"{keyword}: {density:.2f}%\n")
-    report.write("\n")
-
-    report.write("Mobile-Friendliness:\n")
-    report.write(f"{mobile_friendly}\n\n")
-
-    report.write("Schema Markup:\n")
-    for schema in schema_types:
-        report.write(f"{schema}\n")
-    report.write("\n")
-
-    report.write("Accessibility Issues:\n")
-    for issue in accessibility_issues:
-        report.write(f"{issue}\n")
-    report.write("\n")
-
-    report.write(f"Page Load Time: {page_load_time:.2f} seconds\n\n")
-
-    report.write("Broken Links:\n")
-    for link in broken_links:
-        report.write(f"{link}\n")
-    report.write("\n")
-
-    report.write("Social Media Integration Issues:\n")
-    for issue in social_media_issues:
-        report.write(f"{issue}\n")
-    report.write("\n")
-
-    report.write("The Good:\n")
-    for item in good:
-        report.write(f"{item}\n")
-    report.write("\n")
-
-    report.write("The Bad:\n")
-    for item in bad:
-        report.write(f"{item}\n")
-    report.write("\n")
-
-    report.write("Recommendations:\n")
-    for recommendation in recommendations:
-        report.write(f"{recommendation}\n")
-    report.write("\n")
-
-    report.write("Image ALT Attributes:\n")
-    for alt in image_alt_attributes:
-        report.write(f"{alt}\n")
-    report.write("\n")
-
-    report.write(f"Internal Links: {links_ratio['internal']}\n")
-    report.write(f"External Links: {links_ratio['external']}\n")
-
+    report.write(f"SEO Report\nScore: {score}\n\n")
+    report.write(f"Title: {seo_title}\nDescription: {seo_description}\n\n")
+    report.write("Top Keywords:\n" + "\n".join([f"{k}: {v}" for k,v in keywords]) + "\n\n")
+    report.write("Keyword Density:\n" + "\n".join([f"{k}: {v:.2f}%" for k,v in keyword_density.items()]) + "\n\n")
+    report.write(f"Mobile-Friendliness: {mobile_friendly}\n\n")
+    report.write("Schema Types:\n" + "\n".join(schema_types) + "\n\n")
+    report.write("Accessibility Issues:\n" + "\n".join(accessibility_issues) + "\n\n")
+    report.write(f"Page Load Time: {load_time:.2f} seconds\n\n")
+    report.write("Broken Links:\n" + "\n".join(broken_links) + "\n\n")
+    report.write("Social Media Issues:\n" + "\n".join(social_media_issues) + "\n\n")
+    report.write("Good:\n" + "\n".join(good) + "\n\n")
+    report.write("Bad:\n" + "\n".join(bad) + "\n\n")
+    report.write("Recommendations:\n" + "\n".join(recommendations) + "\n\n")
+    report.write("Image ALTs:\n" + "\n".join(image_alts) + "\n\n")
+    report.write(f"Internal Links: {links_ratio['internal']}\nExternal Links: {links_ratio['external']}\n")
     return report.getvalue()
 
+# --- Flask Routes ---
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -307,39 +236,22 @@ def analyze():
         return "URL is required", 400
 
     results = analyze_seo(url)
-    if results[0] is None:
-        return "Error processing URL", 500
+    report_text = generate_report(*results[:-2])
 
-    good, bad, keywords, score, seo_title, seo_description, image_alt_attributes, links_ratio, title_keywords, recommendations, keyword_density, mobile_friendly, schema_types, accessibility_issues, page_load_time, broken_links, social_media_issues, mobile_screenshot_path, desktop_screenshot_path = results
-    result_data = {
-        "url": url,
-        "timestamp": datetime.utcnow(),
-        "score": score,
-        "seo_title": seo_title,
-        "seo_description": seo_description,
-        "keywords": keywords,
-        "title_keywords": title_keywords,
-        "keyword_density": keyword_density,
-        "mobile_friendly": mobile_friendly,
-        "schema_types": schema_types,
-        "accessibility_issues": accessibility_issues,
-        "page_load_time": page_load_time,
-        "broken_links": broken_links,
-        "social_media_issues": social_media_issues,
-        "links_ratio": links_ratio,
-        "good": good,
-        "bad": bad,
-        "recommendations": recommendations
-    }
-    results_collection.insert_one(result_data)  # Insert into MongoDB
+    with open('static/seo_report.txt', 'w') as f:
+        f.write(report_text)
 
-
-    report_text = generate_report(good, bad, keywords, score, seo_title, seo_description, image_alt_attributes, links_ratio, title_keywords, recommendations, keyword_density, mobile_friendly, schema_types, accessibility_issues, page_load_time, broken_links, social_media_issues)
-
-    with open('static/seo_report.txt', 'w') as report_file:
-        report_file.write(report_text)
-
-    return render_template('results.html', good=good, bad=bad, keywords=keywords, score=score, seo_title=seo_title, seo_description=seo_description, image_alt_attributes=image_alt_attributes, links_ratio=links_ratio, title_keywords=title_keywords, recommendations=recommendations, keyword_density=keyword_density, mobile_friendly=mobile_friendly, schema_types=schema_types, accessibility_issues=accessibility_issues, page_load_time=page_load_time, broken_links=broken_links, social_media_issues=social_media_issues, mobile_screenshot_path=mobile_screenshot_path, desktop_screenshot_path=desktop_screenshot_path)
+    return render_template('results.html', **{
+        'good': results[0], 'bad': results[1], 'keywords': results[2],
+        'score': results[3], 'seo_title': results[4], 'seo_description': results[5],
+        'image_alt_attributes': results[6], 'links_ratio': results[7],
+        'title_keywords': results[8], 'recommendations': results[9],
+        'keyword_density': results[10], 'mobile_friendly': results[11],
+        'schema_types': results[12], 'accessibility_issues': results[13],
+        'page_load_time': results[14], 'broken_links': results[15],
+        'social_media_issues': results[16],
+        'mobile_screenshot_path': results[17], 'desktop_screenshot_path': results[18],
+    })
 
 @app.route('/download_report')
 def download_report():
