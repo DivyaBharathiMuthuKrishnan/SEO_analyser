@@ -1,35 +1,131 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <title>Analysis Results</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SEO Results</title>
+    <link rel="stylesheet" href="static/styles2.css">
+
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&family=Montserrat:wght@400;700&display=swap" rel="stylesheet">
+    <script src="static/script.js" defer></script>
 </head>
 <body>
-  <h1>Analysis for {{ url }}</h1>
-  <p><strong>Load Time:</strong> {{ results.load_time }} seconds</p>
-  <p><strong>Title:</strong> {{ results.title }}</p>
-  <p><strong>Meta Description:</strong> {{ results.meta_description }}</p>
+    <header>
+        <div class="container">
+            <h1>SEO Analysis Results</h1>
+        </div>
+    </header>
 
-  <h2>Headings</h2>
-  <ul>
-    {% for level, tags in results.headings.items() %}
-      <li><strong>{{ level }}</strong>: {{ tags }}</li>
-    {% endfor %}
-  </ul>
+    <div class="container">
+        <p><strong>Overall Score:</strong> {{ score }}</p>
+        <p><strong>SEO Title:</strong> {{ seo_title }}</p>
+        <p><strong>SEO Description:</strong> {{ seo_description if seo_description else "None" }}</p>
+        <p><strong>Keywords in Title:</strong> {{ title_keywords | join(', ') }}</p>
+        <p><strong>Top Keywords:</strong></p>
+        <ul>
+            {% for keyword, frequency in keywords %}
+            <li>{{ keyword }}: {{ frequency }}</li>
+            {% endfor %}
+        </ul>
 
-  <h2>Links ({{ results.total_links }})</h2>
-  <ul>
-    {% for link in results.links %}
-      <li>{{ link }}</li>
-    {% endfor %}
-  </ul>
+        <!-- New Section: Keyword Density -->
+        <p><strong>Keyword Density:</strong></p>
+        <ul>
+            {% for keyword, density in keyword_density.items() %}
+            <li>{{ keyword }}: {{ density }}%</li>
+            {% endfor %}
+        </ul>
 
-  <h2>Images ({{ results.total_images }})</h2>
-  <ul>
-    {% for img in results.images %}
-      <li>{{ img }}</li>
-    {% endfor %}
-  </ul>
+        <!-- New Section: Mobile Friendliness -->
+        <p><strong>Mobile Friendliness:</strong></p>
+        <p>{{ mobile_friendly }}</p>
 
-  <a href="/">Back</a>
+        <p><strong>Schema Markup:</strong></p>
+        {% if schema_types %}
+        <ul>
+            {% for schema in schema_types %}
+            <li>{{ schema }}</li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p>No schema markup detected.</p>
+        {% endif %}
+
+        <!-- New Section: Accessibility Issues -->
+        <p><strong>Accessibility Issues:</strong></p>
+        {% if accessibility_issues %}
+        <ul>
+            {% for issue in accessibility_issues %}
+            <li>{{ issue }}</li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p>No accessibility issues detected.</p>
+        {% endif %}
+        <!-- New Section: Page Load Time -->
+        <p><strong>Page Load Time:</strong></p>
+        <p>{{ page_load_time }} seconds</p>
+
+        <!-- New Section: Broken Links -->
+        <p><strong>Broken Links:</strong></p>
+        <ul>
+            {% for link in broken_links %}
+            <li>{{ link }}</li>
+            {% endfor %}
+        </ul>
+
+        <!-- New Section: Social Media Integration Issues -->
+        <p><strong>Social Media Integration Issues:</strong></p>
+        <ul>
+            {% for issue in social_media_issues %}
+            <li>{{ issue }}</li>
+            {% endfor %}
+        </ul>
+
+        <p><strong>The Good:</strong></p>
+        <ul>
+            {% for item in good %}
+            <li>{{ item }}</li>
+            {% endfor %}
+        </ul>
+
+        <p><strong>The Bad:</strong></p>
+        <ul>
+            {% for item in bad %}
+            <li>{{ item }}</li>
+            {% endfor %}
+        </ul>
+
+        <p><strong>Image ALT Attributes:</strong></p>
+        <ul>
+            {% for alt in image_alt_attributes %}
+            <li>{{ alt }}</li>
+            {% endfor %}
+        </ul>
+
+        <p><strong>Links Ratio:</strong></p>
+        <p>Internal Links: {{ links_ratio.internal }}</p>
+        <p>External Links: {{ links_ratio.external }}</p>
+
+        <p><strong>Recommendations:</strong></p>
+        <ul>
+            {% for recommendation in recommendations %}
+            <li>{{ recommendation }}</li>
+            {% endfor %}
+        </ul>
+
+        
+
+        <a href="{{ url_for('download_report') }}">Download Full Report</a>
+    </div>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2024 SEO Analyzer Tool. All rights reserved.</p>
+            <a href="{{ url_for('download_report') }}">Download Report</a>
+        </div>
+    </footer>
 </body>
 </html>
+
+
