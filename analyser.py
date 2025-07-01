@@ -7,12 +7,10 @@ from nltk.corpus import stopwords
 from io import StringIO
 import json
 import concurrent.futures
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime
 from collections import Counter
+import requests
+import time
 
 app = Flask(__name__)
 
@@ -20,32 +18,14 @@ nltk.download('stopwords')
 nltk.download('punkt')
 stop_words = set(stopwords.words('english'))
 
-# --- Selenium Headless Chrome Utility ---
+# --- Simple Page Fetch (no Selenium / screenshots) ---
 def fetch_page_data(url):
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1280,1024")
-
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-    driver.get(url)
-
-    # Take desktop screenshot
-    desktop_screenshot = 'static/desktop_preview.png'
-    driver.save_screenshot(desktop_screenshot)
-
-    # Take mobile screenshot
-    driver.set_window_size(360, 640)
-    mobile_screenshot = 'static/mobile_preview.png'
-    driver.save_screenshot(mobile_screenshot)
-
-    # Get load time
-    timing = driver.execute_script("return window.performance.timing")
-    load_time = (timing['loadEventEnd'] - timing['navigationStart']) / 1000
-
-    html = driver.page_source
-    driver.quit()
-    return html, load_time, mobile_screenshot, desktop_screenshot
+    start_time = time.time()
+    response = requests.get(url)
+    end_time = time.time()
+    load_time = end_time - start_time
+    html = response.text
+    return html, load_time
 
 # --- Keyword Extraction Optimized ---
 def extract_top_keywords(text, top_n=10):
@@ -116,7 +96,7 @@ def check_social_meta(soup):
 
 # --- Main SEO Analysis Function ---
 def analyze_seo(url):
-    html, load_time, mobile_ss, desktop_ss = fetch_page_data(url)
+    html, load_time = fetch_page_data(url)
     soup = BeautifulSoup(html, 'html.parser')
 
     good, bad, recommendations = [], [], []
@@ -192,8 +172,7 @@ def analyze_seo(url):
         image_alts, links_ratio, title_keywords, recommendations,
         keyword_density, check_mobile_friendly(soup), detect_schema(soup),
         check_accessibility(soup), load_time,
-        check_broken_links(soup, url), check_social_meta(soup),
-        mobile_ss, desktop_ss
+        check_broken_links(soup, url), check_social_meta(soup)
     )
 
 # --- Report Generator ---
@@ -236,7 +215,7 @@ def analyze():
         return "URL is required", 400
 
     results = analyze_seo(url)
-    report_text = generate_report(*results[:-2])
+    report_text = generate_report(*results)
 
     with open('static/seo_report.txt', 'w') as f:
         f.write(report_text)
@@ -249,8 +228,7 @@ def analyze():
         'keyword_density': results[10], 'mobile_friendly': results[11],
         'schema_types': results[12], 'accessibility_issues': results[13],
         'page_load_time': results[14], 'broken_links': results[15],
-        'social_media_issues': results[16],
-        'mobile_screenshot_path': results[17], 'desktop_screenshot_path': results[18],
+        'social_media_issues': results[16]
     })
 
 @app.route('/download_report')
